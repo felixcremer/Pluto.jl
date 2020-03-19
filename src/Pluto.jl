@@ -211,15 +211,68 @@ function assetresponse(path)
     end
 end
 
-function serveonefile(path)
+function serve_onefile(path)
     return request::HTTP.Request->assetresponse(normpath(path))
 end
 
-function serveasset(req::HTTP.Request)
+function serve_asset(req::HTTP.Request)
     reqURI = HTTP.URI(req.target)
     
     filepath = joinpath(packagerootdir, relpath(reqURI.path, "/"))
     assetresponse(filepath)
+end
+
+
+"""Serves requests like http://localhost:1234/chached?https://fonts.googleapis.com/css?family=Roboto
+
+If the resource is requested for the first time, it downloads it and passes it on. 
+It maintains a cache in the /assets/cached/ folder.
+
+This is a very rudimental cache system, and does have expiration dates, for example.
+"""
+function serve_cached(req::HTTP.Request)
+    reqURI = HTTP.URI(req.target)
+    resourceURI = HTTP.URI(reqURI.query)
+
+    localname = string(hash(resourceURI))
+    localpath = joinpath(packagerootdir, "assets", "cached", localname)
+
+    if isfile(localpath) && isfile(localpath * ".meta.json")
+        body = read(localpath)
+        meta = JSON.parsefile(localpath * ".meta.json")
+
+        r = HTTP.Response()
+        r.body = body
+        r.status = meta["status"]
+        r.headers = collect(meta["headers"])
+
+        return r
+    else
+        conf = (readtimeout = 5,
+                retry = true,
+                retries = 2,
+                redirect = true,
+                redirect_limit = 20)
+        
+        @info resourceURI
+        newheaders = Dict(req.headers...)
+        newheaders["Host"] = resourceURI.host
+        @info collect(newheaders)
+
+        response = HTTP.request("GET", resourceURI.uri, []; conf...)
+
+        meta = Dict(:status => response.status,
+                    :headers => Dict(response.headers...),
+                    :timestamp => string(Int64(floor(time()))))
+        open(localpath, "w") do io
+            write(io, response.body)
+        end
+        open(localpath * ".meta.json", "w") do io
+            JSON.print(io, meta)
+        end
+        # relay remote response to client
+        return response
+    end
 end
 
 const PLUTOROUTER = HTTP.Router()
@@ -281,17 +334,18 @@ function serve_newfile(req::HTTP.Request)
     return notebook_redirect(nb)
 end
 
-HTTP.@register(PLUTOROUTER, "GET", "/", serveonefile(joinpath(packagerootdir, "assets", "welcome.html")))
-HTTP.@register(PLUTOROUTER, "GET", "/edit", serveonefile(joinpath(packagerootdir, "assets", "editor.html")))
+HTTP.@register(PLUTOROUTER, "GET", "/", serve_onefile(joinpath(packagerootdir, "assets", "welcome.html")))
+HTTP.@register(PLUTOROUTER, "GET", "/edit", serve_onefile(joinpath(packagerootdir, "assets", "editor.html")))
 HTTP.@register(PLUTOROUTER, "GET", "/sample", serve_samplefile)
 HTTP.@register(PLUTOROUTER, "GET", "/new", serve_newfile)
 HTTP.@register(PLUTOROUTER, "GET", "/open", serve_openfile)
-HTTP.@register(PLUTOROUTER, "GET", "/index", serveonefile(joinpath(packagerootdir, "assets", "welcome.html")))
-HTTP.@register(PLUTOROUTER, "GET", "/index.html", serveonefile(joinpath(packagerootdir, "assets", "welcome.html")))
+HTTP.@register(PLUTOROUTER, "GET", "/index", serve_onefile(joinpath(packagerootdir, "assets", "welcome.html")))
+HTTP.@register(PLUTOROUTER, "GET", "/index.html", serve_onefile(joinpath(packagerootdir, "assets", "welcome.html")))
 
-HTTP.@register(PLUTOROUTER, "GET", "/favicon.ico", serveonefile(joinpath(packagerootdir, "assets", "favicon.ico")))
+HTTP.@register(PLUTOROUTER, "GET", "/favicon.ico", serve_onefile(joinpath(packagerootdir, "assets", "favicon.ico")))
 
-HTTP.@register(PLUTOROUTER, "GET", "/assets/*", serveasset)
+HTTP.@register(PLUTOROUTER, "GET", "/assets/*", serve_asset)
+HTTP.@register(PLUTOROUTER, "GET", "/assets/cached", serve_cached)
 
 HTTP.@register(PLUTOROUTER, "GET", "/ping", r->HTTP.Response(200, JSON.json("OK!")))
 
